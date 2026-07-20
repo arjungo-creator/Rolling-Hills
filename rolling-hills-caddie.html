@@ -1,0 +1,1591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="description" content="Tournament caddie guide with hole strategies, photos, and course markup" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+  <meta name="apple-mobile-web-app-title" content="Caddie" />
+  
+  <title>Tournament Caddie Template</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  
+  <style>
+    * {
+      -webkit-tap-highlight-color: transparent;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    input, button, textarea { -webkit-user-select: text; user-select: text; }
+    html, body { width: 100%; height: 100%; margin: 0; padding: 0; }
+    body { background: #0f172a; color: #f1f5f9; font-family: system-ui, -apple-system, sans-serif; }
+    .safe-top { padding-top: max(env(safe-area-inset-top), 50px); }
+    .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 12px); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    /* ============================================================
+       TOURNAMENT CADDIE TEMPLATE — HOW TO REUSE THIS FOR A NEW EVENT
+       ============================================================
+       1. Edit the CONFIG object right below: tournament name, course
+          names, and a unique TOURNAMENT_ID (this keeps each
+          tournament's saved edits/photos/markers separate — both in
+          this phone's storage AND in the cloud backup — so reusing
+          this file for a new event won't mix up old and new data.
+          Use a new ID per event, e.g. 'fall-classic-2027'.
+
+       2. Scroll down to `holesCourse1` and `holesCourse2`. Each is an
+          array of hole objects. A few example holes are included
+          showing every field you can use — copy/paste one, edit the
+          values, and add/remove hole objects until you've got the
+          right number of holes for each course. Fields you can skip
+          per hole: hardest, notes, teeShotOption2, images, upshot,
+          keyAlert, fieldNotes, shape (shape/keyAlert/fieldNotes are
+          not shown in the app, safe to leave off entirely).
+
+       3. If your event is only ONE course, just make holesCourse2 an
+          empty array ([]) and it'll still work — the Course 2 tab
+          will simply show no holes selected.
+
+       4. For photos: hard-code Cloudinary (or any direct-link) URLs
+          into each hole's `images` array ahead of time, or leave them
+          empty and use the in-app "Manage Photos" uploader once
+          you've set up a Cloudinary unsigned upload preset (one-time
+          setup, prompted the first time you use it in the app).
+
+       5. Photo markup (FH/BH/Basket/Arrow boxes drawn on photos) works
+          out of the box — no setup needed, it's all local + synced
+          via the same cloud backup as everything else.
+
+       6. Cloud backup is already wired up below (CONFIG.SUPABASE_URL /
+          SUPABASE_ANON_KEY) — it points at the shared caddie-app
+          Supabase project, so nothing to set up. Just make sure
+          TOURNAMENT_ID above is unique to this event before you
+          build; that's what keeps every tournament's data separate
+          inside the one shared project. Only create a brand new
+          Supabase project if you deliberately want this event fully
+          isolated from the rest — if so, make a free project at
+          supabase.com and run this SQL once in its SQL Editor:
+
+            create table caddie_data (
+              key text primary key,
+              value jsonb,
+              updated_at timestamptz default now()
+            );
+            alter table caddie_data enable row level security;
+            create policy "Allow anon access" on caddie_data
+              for all using (true) with check (true);
+
+          then swap in that project's URL and "publishable" (anon) key
+          — NOT the secret key — below. Leave both fields blank instead
+          if you'd rather skip cloud backup entirely for this event —
+          the app still works fine on local storage alone.
+
+       7. Deploy the finished file to Netlify (or wherever) as usual.
+       ============================================================ */
+
+    const CONFIG = {
+      TOURNAMENT_ID: 'rolling-hills-2026',      // ALWAYS change this per event — this is what keeps
+                                            // each tournament's saved edits/photos/markers separate
+                                            // in the shared Supabase project below. Reusing an ID
+                                            // will overwrite/merge that event's data.
+      TOURNAMENT_NAME: 'Rolling Hills',     // shown in the header, e.g. "MY TOURNAMENT COURSE 1 • ROUND 1"
+      COURSE_1_NAME: 'Original',
+      COURSE_2_NAME: 'Course 2',
+      // Pre-wired to the shared caddie-app Supabase project (created for Black Locust,
+      // now reused across events). Cloud backup works out of the box — no setup needed.
+      // Only touch these if you want a *different* project instead of the shared one.
+      SUPABASE_URL: 'https://chfowzcgkhubkzzzqmsi.supabase.co',
+      SUPABASE_ANON_KEY: 'sb_publishable_t0ws6UrUp-1oYtTPlew0ag_i7XCCMHN',
+    };
+
+    const { useState } = React;
+
+    // ---- Cloud backup (Supabase) ----
+    // This is a background safety net, not the primary storage. The app
+    // always reads/writes localStorage first (instant, works offline on
+    // the course), then quietly mirrors changes to Supabase when there's
+    // a connection. If Supabase isn't configured or is unreachable,
+    // everything still works exactly the same — saves just don't get
+    // backed up until it's set up / signal comes back.
+    let supabaseClient = null;
+    try {
+      if (CONFIG.SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY && window.supabase && window.supabase.createClient) {
+        supabaseClient = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+      }
+    } catch (e) {}
+
+    const cloudPush = async (key, value) => {
+      if (!supabaseClient) return;
+      try {
+        await supabaseClient.from('caddie_data').upsert({
+          key: `${CONFIG.TOURNAMENT_ID}-${key}`,
+          value,
+          updated_at: new Date().toISOString(),
+        });
+      } catch (e) {
+        // Offline or unreachable — local save already succeeded, so this is safe to ignore.
+      }
+    };
+
+    const cloudPull = async (key) => {
+      if (!supabaseClient) return null;
+      try {
+        const { data, error } = await supabaseClient
+          .from('caddie_data')
+          .select('value')
+          .eq('key', `${CONFIG.TOURNAMENT_ID}-${key}`)
+          .maybeSingle();
+        if (error || !data) return null;
+        return data.value;
+      } catch (e) {
+        return null;
+      }
+    };
+
+    // Debounced cloud push: rapid-fire calls (e.g. every keystroke while
+    // typing notes) can land on the server out of order, letting an older
+    // keystroke's save overwrite a newer one. Coalescing to the last call
+    // in a short window guarantees only the final value gets sent.
+    const cloudPushTimers = {};
+    const cloudPushDebounced = (key, value, delay = 800) => {
+      clearTimeout(cloudPushTimers[key]);
+      cloudPushTimers[key] = setTimeout(() => cloudPush(key, value), delay);
+    };
+
+
+    const AlertCircle = ({ size = 16, className = '' }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+    );
+
+    const ChevronLeft = () => (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <polyline points="15 18 9 12 15 6"></polyline>
+      </svg>
+    );
+
+    const ChevronRight = () => (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <polyline points="9 18 15 12 9 6"></polyline>
+      </svg>
+    );
+
+    function BlackLocustApp() {
+      const [course, setCourse] = useState('course1');
+      const [currentHole, setCurrentHole] = useState(1);
+      const [imageIndex, setImageIndex] = useState(0);
+      const touchStartX = React.useRef(null);
+      const touchStartY = React.useRef(null);
+      const [edits, setEdits] = useState(() => {
+        try {
+          const saved = localStorage.getItem(`${CONFIG.TOURNAMENT_ID}-caddie-edits`);
+          return saved ? JSON.parse(saved) : {};
+        } catch (e) {
+          return {};
+        }
+      });
+
+      const editKey = `${course}-${currentHole}`;
+
+      const [showExport, setShowExport] = useState(false);
+      const [copyStatus, setCopyStatus] = useState('idle');
+      const [showPhotoExport, setShowPhotoExport] = useState(false);
+      const [copyPhotoStatus, setCopyPhotoStatus] = useState('idle');
+
+      const persistEdits = (data) => {
+        try {
+          localStorage.setItem(`${CONFIG.TOURNAMENT_ID}-caddie-edits`, JSON.stringify(data));
+          cloudPushDebounced('edits', data);
+          return true;
+        } catch (e) {
+          return false;
+        }
+      };
+
+      const updateEdit = (field, value) => {
+        setEdits(prev => {
+          const next = {
+            ...prev,
+            [editKey]: { ...prev[editKey], [field]: value },
+          };
+          persistEdits(next);
+          return next;
+        });
+      };
+
+      const [photoEdits, setPhotoEdits] = useState(() => {
+        try {
+          const saved = localStorage.getItem(`${CONFIG.TOURNAMENT_ID}-caddie-photos`);
+          return saved ? JSON.parse(saved) : {};
+        } catch (e) {
+          return {};
+        }
+      });
+
+      const [cloudConfig, setCloudConfig] = useState(() => {
+        try {
+          const saved = localStorage.getItem('bl-cloudinary-config');
+          return saved ? JSON.parse(saved) : { cloudName: 'aqpu273k', uploadPreset: '' };
+        } catch (e) {
+          return { cloudName: 'aqpu273k', uploadPreset: '' };
+        }
+      });
+
+      const [showPhotoManager, setShowPhotoManager] = useState(false);
+      const [uploadStatus, setUploadStatus] = useState('idle'); // idle | uploading | error
+      const [uploadError, setUploadError] = useState('');
+      const [showCloudSettings, setShowCloudSettings] = useState(false);
+
+      // ---- Photo markup (draggable boxes/circles with text labels) ----
+      const [annotations, setAnnotations] = useState(() => {
+        try {
+          const saved = localStorage.getItem(`${CONFIG.TOURNAMENT_ID}-caddie-annotations`);
+          return saved ? JSON.parse(saved) : {};
+        } catch (e) {
+          return {};
+        }
+      });
+      const [markupMode, setMarkupMode] = useState(false);
+      const [markersVisible, setMarkersVisible] = useState(true);
+      const [draggingMarkerId, setDraggingMarkerId] = useState(null);
+      const [rotatingMarkerId, setRotatingMarkerId] = useState(null);
+      const [resizingMarkerId, setResizingMarkerId] = useState(null);
+      const imageContainerRef = React.useRef(null);
+      const markerOuterRefs = React.useRef({});
+
+      const persistAnnotations = (data) => {
+        try {
+          localStorage.setItem(`${CONFIG.TOURNAMENT_ID}-caddie-annotations`, JSON.stringify(data));
+          cloudPush('annotations', data);
+        } catch (e) {}
+        setAnnotations(data);
+      };
+
+      const getMarkersForUrl = (url) => annotations[url] || [];
+
+      const addMarker = (url, type, text) => {
+        const list = getMarkersForUrl(url);
+        const newMarker = {
+          id: `m${Date.now()}`,
+          type, // 'box', 'circle', or 'arrow'
+          x: 45 + Math.random() * 10, // percent, roughly centered with slight offset for stacking
+          y: 45 + Math.random() * 10,
+          rotation: 0,      // degrees, arrow only
+          armLength: 26,    // px from center to tip, arrow only
+          w: 56, h: 36,     // box only
+          size: 56,         // circle only (diameter)
+          text,
+        };
+        persistAnnotations({ ...annotations, [url]: [...list, newMarker] });
+      };
+
+      const updateMarker = (url, id, changes) => {
+        const list = getMarkersForUrl(url).map(m => (m.id === id ? { ...m, ...changes } : m));
+        persistAnnotations({ ...annotations, [url]: list });
+      };
+
+      const removeMarker = (url, id) => {
+        const list = getMarkersForUrl(url).filter(m => m.id !== id);
+        persistAnnotations({ ...annotations, [url]: list });
+      };
+
+      const handleMarkerPointerDown = (e, marker) => {
+        if (!markupMode) return;
+        e.stopPropagation();
+        e.preventDefault();
+        try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
+        setDraggingMarkerId(marker.id);
+      };
+
+      const handleMarkerPointerMove = (e, url, marker) => {
+        if (draggingMarkerId !== marker.id || !imageContainerRef.current) return;
+        const rect = imageContainerRef.current.getBoundingClientRect();
+        let xPct = ((e.clientX - rect.left) / rect.width) * 100;
+        let yPct = ((e.clientY - rect.top) / rect.height) * 100;
+        xPct = Math.max(2, Math.min(98, xPct));
+        yPct = Math.max(2, Math.min(98, yPct));
+        updateMarker(url, marker.id, { x: xPct, y: yPct });
+      };
+
+      const handleMarkerPointerUp = () => {
+        setDraggingMarkerId(null);
+      };
+
+      // Arrow direction + length: drag the small handle at the arrow's tip.
+      // Angle sets the direction, distance from center sets how long it is.
+      const handleRotateHandlePointerDown = (e, marker) => {
+        e.stopPropagation();
+        e.preventDefault();
+        try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
+        setRotatingMarkerId(marker.id);
+      };
+
+      const handleRotateHandlePointerMove = (e, url, marker) => {
+        if (rotatingMarkerId !== marker.id) return;
+        const el = markerOuterRefs.current[marker.id];
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const dx = e.clientX - cx;
+        const dy = e.clientY - cy;
+        const angleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
+        const length = Math.max(15, Math.min(70, Math.sqrt(dx * dx + dy * dy)));
+        updateMarker(url, marker.id, { rotation: angleDeg, armLength: length });
+      };
+
+      const handleRotateHandlePointerUp = () => {
+        setRotatingMarkerId(null);
+      };
+
+      // Box/circle resize: drag the handle at the bottom-right corner.
+      // Size grows/shrinks based on distance from the marker's center.
+      const handleResizeHandlePointerDown = (e, marker) => {
+        e.stopPropagation();
+        e.preventDefault();
+        try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
+        setResizingMarkerId(marker.id);
+      };
+
+      const handleResizeHandlePointerMove = (e, url, marker) => {
+        if (resizingMarkerId !== marker.id) return;
+        const el = markerOuterRefs.current[marker.id];
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        if (marker.type === 'circle') {
+          const dx = e.clientX - cx;
+          const dy = e.clientY - cy;
+          const radius = Math.max(12, Math.min(160, Math.sqrt(dx * dx + dy * dy)));
+          updateMarker(url, marker.id, { size: radius * 2 });
+        } else {
+          const halfW = Math.max(15, Math.min(160, e.clientX - cx));
+          const halfH = Math.max(10, Math.min(160, e.clientY - cy));
+          updateMarker(url, marker.id, { w: halfW * 2, h: halfH * 2 });
+        }
+      };
+
+      const handleResizeHandlePointerUp = () => {
+        setResizingMarkerId(null);
+      };
+
+      const persistPhotoEdits = (data) => {
+        try {
+          localStorage.setItem(`${CONFIG.TOURNAMENT_ID}-caddie-photos`, JSON.stringify(data));
+          cloudPush('photos', data);
+        } catch (e) {}
+        setPhotoEdits(data);
+      };
+
+      const persistCloudConfig = (data) => {
+        try {
+          localStorage.setItem('bl-cloudinary-config', JSON.stringify(data));
+        } catch (e) {}
+        setCloudConfig(data);
+      };
+
+      const updateImageOrder = (photoKey, newOrder) => {
+        persistPhotoEdits({ ...photoEdits, [photoKey]: { order: newOrder } });
+      };
+
+      const removeImageAt = (photoKey, currentImages, idx) => {
+        const newOrder = currentImages.filter((_, i) => i !== idx);
+        updateImageOrder(photoKey, newOrder);
+        setImageIndex(prev => Math.min(prev, Math.max(newOrder.length - 1, 0)));
+      };
+
+      const moveImageAt = (photoKey, currentImages, idx, direction) => {
+        const swapWith = idx + direction;
+        if (swapWith < 0 || swapWith >= currentImages.length) return;
+        const newOrder = [...currentImages];
+        [newOrder[idx], newOrder[swapWith]] = [newOrder[swapWith], newOrder[idx]];
+        updateImageOrder(photoKey, newOrder);
+      };
+
+      // Shrinks a photo client-side before upload so it never trips Cloudinary's
+      // 10MB free-tier limit, regardless of camera format (HEIC "Most Compatible"
+      // photos especially can exceed it). Caps the long edge at 2000px and
+      // re-encodes as JPEG, stepping quality down further only if still too big.
+      const compressImage = (file, maxBytes = 9.5 * 1024 * 1024, maxDim = 2000) => {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          const url = URL.createObjectURL(file);
+          img.onload = () => {
+            URL.revokeObjectURL(url);
+            let { width, height } = img;
+            if (width > maxDim || height > maxDim) {
+              if (width > height) {
+                height = Math.round((height * maxDim) / width);
+                width = maxDim;
+              } else {
+                width = Math.round((width * maxDim) / height);
+                height = maxDim;
+              }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+
+            const tryQuality = (q) => {
+              canvas.toBlob((blob) => {
+                if (!blob) { reject(new Error('Could not process image')); return; }
+                if (blob.size <= maxBytes || q <= 0.5) {
+                  resolve(new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' }));
+                } else {
+                  tryQuality(q - 0.1);
+                }
+              }, 'image/jpeg', q);
+            };
+            tryQuality(0.85);
+          };
+          img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read image')); };
+          img.src = url;
+        });
+      };
+
+      const uploadPhotos = async (photoKey, currentImages, files) => {
+        if (!cloudConfig.cloudName || !cloudConfig.uploadPreset) {
+          setUploadError('Set up your Cloudinary cloud name and upload preset first.');
+          return;
+        }
+        setUploadStatus('uploading');
+        setUploadError('');
+        const uploadedUrls = [];
+        for (const file of files) {
+          try {
+            const toSend = await compressImage(file).catch(() => file); // fall back to original if compression fails
+            const formData = new FormData();
+            formData.append('file', toSend);
+            formData.append('upload_preset', cloudConfig.uploadPreset);
+            const res = await fetch(
+              `https://api.cloudinary.com/v1_1/${cloudConfig.cloudName}/image/upload`,
+              { method: 'POST', body: formData }
+            );
+            const data = await res.json();
+            if (data.secure_url) {
+              uploadedUrls.push(data.secure_url);
+            } else {
+              throw new Error(data.error?.message || 'Upload failed');
+            }
+          } catch (e) {
+            setUploadStatus('error');
+            setUploadError(e.message || 'Upload failed. Check your Cloudinary settings.');
+            return;
+          }
+        }
+        updateImageOrder(photoKey, [...currentImages, ...uploadedUrls]);
+        setUploadStatus('idle');
+      };
+
+      const holesCourse1 = [
+        {
+          number: 1, yardage: 260, par: 3,
+          stats: { birdie: 12, par: 60, bogey: 23, doublePlus: 5 },
+          tier: 'T3', tierName: 'GRIND', hazard: false,
+          images: ['https://res.cloudinary.com/aqpu273k/image/upload/v1784252861/crfmpkmdo3w4wjigqvzx.jpg'],
+          dogleg: null, teeShotDisc: 'FD BH',
+          upshot: 'Berg/Luna', notes: 'Dead straight, flat.',
+        },
+        {
+          number: 2, yardage: 365, par: 3,
+          stats: { birdie: 41, par: 40, bogey: 13, doublePlus: 6 },
+          tier: 'T2', tierName: 'BIRDIE OPP.', hazard: false,
+          images: ['https://res.cloudinary.com/aqpu273k/image/upload/v1784252890/rcklxlsfe9dyxp75eiyj.jpg'],
+          dogleg: 'LEFT @ 235ft', teeShotDisc: 'FD BH',
+          notes: 'Fade hits the bend. Downhill finish — don\u2019t overputt. Par is a great score.',
+          upshot: 'Luna (downhill)',
+        },
+        {
+          number: 3, yardage: 297, par: 3,
+          stats: { birdie: 54, par: 29, bogey: 12, doublePlus: 5 },
+          tier: 'T2', tierName: 'BIRDIE OPP.', hazard: false,
+          images: ['https://res.cloudinary.com/aqpu273k/image/upload/v1784253238/z3h8mtrgiwficgmjrfdh.jpg'],
+          dogleg: null, teeShotDisc: 'FD BH',
+          notes: 'Tight tunnel — respect it.',
+          upshot: 'Berg/Luna',
+        },
+        {
+          number: 4, yardage: 245, par: 3,
+          stats: { birdie: 13, par: 59, bogey: 23, doublePlus: 5 },
+          tier: 'T3', tierName: 'GRIND', hazard: false, images: [],
+          dogleg: null, teeShotDisc: 'FD BH',
+          notes: 'Dead straight, tight wooded.',
+          upshot: 'Berg/Luna',
+        },
+        {
+          number: 5, yardage: 257, par: 3,
+          stats: { birdie: 16, par: 58, bogey: 21, doublePlus: 5 },
+          tier: 'T3', tierName: 'GRIND', hazard: false, images: [],
+          dogleg: null, teeShotDisc: 'FD BH',
+          notes: 'Dead straight, open LZ left.',
+          upshot: 'Berg/Luna',
+        },
+        {
+          number: 6, yardage: 251, par: 3,
+          stats: { birdie: 18, par: 56, bogey: 20, doublePlus: 6 },
+          tier: 'T3', tierName: 'GRIND', hazard: false, images: [],
+          dogleg: null, teeShotDisc: 'FD BH',
+          notes: 'Downhill — needs 70-75% power, changes putting strategy.',
+          upshot: 'Berg/Luna',
+        },
+        {
+          number: 7, yardage: 236, par: 3,
+          stats: { birdie: 17, par: 58, bogey: 20, doublePlus: 5 },
+          tier: 'T3', tierName: 'GRIND', hazard: false, images: [],
+          dogleg: null, teeShotDisc: 'FD BH',
+          notes: 'Dead straight, tight wooded.',
+          upshot: 'Berg/Luna',
+        },
+        {
+          number: 8, yardage: 182, par: 3,
+          stats: { birdie: 22, par: 54, bogey: 19, doublePlus: 5 },
+          tier: 'T2', tierName: 'BIRDIE OPP.', hazard: false, images: [],
+          dogleg: null, teeShotDisc: 'Luna/Pyro BH',
+          notes: 'Blind downhill tee — 60-65% power. Best birdie front 9.',
+          upshot: 'Berg',
+        },
+        {
+          number: 9, yardage: 269, par: 3,
+          stats: { birdie: 46, par: 35, bogey: 10, doublePlus: 9 },
+          tier: 'T2', tierName: 'BIRDIE OPP.', hazard: false, images: [],
+          dogleg: 'RIGHT @ 150ft', teeShotDisc: 'FD BH',
+          notes: 'Aim left, let it fade into the bend. The wide opening past the bend is a false friend — stay right. Par is a great score.',
+          upshot: 'Berg/Luna',
+        },
+        {
+          number: 10, yardage: 256, par: 3,
+          stats: { birdie: 22, par: 53, bogey: 19, doublePlus: 6 },
+          tier: 'T2', tierName: 'BIRDIE OPP.', hazard: false, images: [],
+          dogleg: 'LEFT @ 190ft', teeShotDisc: 'FD BH',
+          notes: 'Aim right, fade finishes it. Fallen tree crosses the left fairway; rough on the right side is penal — lost a disc there.',
+          upshot: 'Berg/Luna',
+        },
+        {
+          number: 11, yardage: 196, par: 3,
+          stats: { birdie: 11, par: 52, bogey: 28, doublePlus: 9 },
+          tier: 'T1', tierName: 'DANGER', hazard: true, images: [],
+          dogleg: null, teeShotDisc: 'Luna/Pyro BH',
+          notes: 'Steep uphill plays significantly longer than marked. Tighter than it looks. Morning sun glare.',
+          upshot: 'Berg',
+        },
+        {
+          number: 12, yardage: 197, par: 3,
+          stats: { birdie: 31, par: 53, bogey: 13, doublePlus: 3 },
+          tier: 'T2', tierName: 'BIRDIE OPP.', hazard: false, images: [],
+          dogleg: null, teeShotDisc: 'Luna/Pyro BH',
+          notes: 'Dead straight, tight.',
+          upshot: 'Berg',
+        },
+        {
+          number: 13, yardage: 163, par: 3,
+          stats: { birdie: 34, par: 54, bogey: 9, doublePlus: 3 },
+          tier: 'T2', tierName: 'BIRDIE OPP.', hazard: false, images: [],
+          dogleg: null, teeShotDisc: 'Sled BH',
+          notes: 'Easy swing, wide open. Left-to-right downslope green — putts must miss left. Best birdie — ace run.',
+          upshot: 'Berg',
+        },
+        {
+          number: 14, yardage: 287, par: 3,
+          stats: { birdie: 27, par: 44, bogey: 21, doublePlus: 8 },
+          tier: 'T2', tierName: 'BIRDIE OPP.', hazard: false, images: [],
+          hardest: '#1 hardest hole',
+          dogleg: 'RIGHT @ 175ft (hard ~90°)', teeShotDisc: 'Firebird FH',
+          notes: 'Commit to the FH line to turn the corner. Reclassified as the hardest hole on the course — high variance despite the birdie look.',
+          upshot: 'Berg/Luna',
+        },
+        {
+          number: 15, yardage: 289, par: 3,
+          stats: { birdie: 10, par: 51, bogey: 29, doublePlus: 10 },
+          tier: 'T1', tierName: 'DANGER', hazard: true, images: [],
+          dogleg: 'LEFT @ 170ft', teeShotDisc: 'FD BH',
+          notes: 'Aim right, fade finishes left. Dramatically elevated tee, steep downhill, diagonal leaning tree obstacle.',
+          upshot: 'Berg/Luna',
+        },
+        {
+          number: 16, yardage: 317, par: 3,
+          stats: { birdie: 34, par: 44, bogey: 16, doublePlus: 6 },
+          tier: 'T2', tierName: 'BIRDIE OPP.', hazard: false, images: [],
+          dogleg: 'RIGHT @ 115ft', teeShotDisc: 'Thunderbird FH',
+          teeShotOption2: 'Luna/Zone FH backup',
+          notes: 'Center tree at ~200ft creates two gaps — commit FH at the LEFT gap. Right gap is a safe miss. Missing left is the only bad miss. High variance — rounds are won or lost here.',
+          upshot: 'Luna/Zone',
+        },
+        {
+          number: 17, yardage: 222, par: 3,
+          stats: { birdie: 12, par: 56, bogey: 25, doublePlus: 7 },
+          tier: 'T1', tierName: 'DANGER', hazard: true, images: [],
+          dogleg: null, teeShotDisc: 'Buzz BH',
+          teeShotOption2: 'FD BH backup',
+          notes: 'Uphill corridor, tree right off the tee — aim left of it. Plays longer than 222ft due to elevation. Don\u2019t short-arm the upshot.',
+          upshot: 'Berg/Luna',
+        },
+        {
+          number: 18, yardage: 210, par: 3,
+          stats: { birdie: 25, par: 55, bogey: 16, doublePlus: 4 },
+          tier: 'T2', tierName: 'BIRDIE OPP.', hazard: false, images: [],
+          dogleg: 'RIGHT @ ~150ft', teeShotDisc: 'Buzz/Zone FH',
+          teeShotOption2: 'Firebird FH when confident \u2022 Putter BH safe bail',
+          notes: 'Straight uphill then hard bend right to a hidden basket. 3-tier plan: Firebird (aggressive) > Buzz/Zone FH (primary) > Putter BH (safe bail). Don\u2019t leak left on the upshot.',
+          upshot: 'Berg',
+        },
+      ];
+
+      const holesCourse2 = [];
+
+      const holes = course === 'course1' ? holesCourse1 : holesCourse2;
+      const hole = holes[currentHole - 1];
+      const photoKey = `${course}-${currentHole}`;
+      const images = photoEdits[photoKey]?.order ?? hole.images ?? [];
+      const hazardHoles = holes.filter(h => h.hazard).map(h => h.number);
+      const switchCourse = (c) => {
+        if (c === course) return;
+        setCourse(c);
+        setCurrentHole(1);
+        setImageIndex(0);
+      };
+
+      React.useEffect(() => {
+        document.title = `${CONFIG.TOURNAMENT_NAME} Caddie`;
+      }, []);
+
+      // Cloud sync: pulls the latest saved data from Supabase and merges it
+      // with whatever's local. Cloud wins on overlapping holes (it's kept
+      // up to date by every device's edits), local fills in anything the
+      // cloud doesn't have (e.g. edits made fully offline). Runs on load,
+      // whenever the tab regains focus, and via the manual Sync button —
+      // so editing on your phone and then switching to desktop picks up
+      // those changes without needing a fresh browser profile.
+      const [cloudSyncStatus, setCloudSyncStatus] = useState('idle'); // idle | checking | restored | offline | unconfigured
+      const [lastSyncedAt, setLastSyncedAt] = useState(null);
+
+      const syncFromCloud = React.useCallback(async () => {
+        if (!supabaseClient) {
+          setCloudSyncStatus(CONFIG.SUPABASE_URL ? 'offline' : 'unconfigured');
+          return;
+        }
+        setCloudSyncStatus('checking');
+        try {
+          const [cloudEdits, cloudPhotos, cloudAnnotations] = await Promise.all([
+            cloudPull('edits'),
+            cloudPull('photos'),
+            cloudPull('annotations'),
+          ]);
+          if (cloudEdits) {
+            setEdits(prevLocal => {
+              const merged = { ...prevLocal, ...cloudEdits };
+              try { localStorage.setItem(`${CONFIG.TOURNAMENT_ID}-caddie-edits`, JSON.stringify(merged)); } catch (e) {}
+              return merged;
+            });
+          }
+          if (cloudPhotos) {
+            setPhotoEdits(prevLocal => {
+              const merged = { ...prevLocal, ...cloudPhotos };
+              try { localStorage.setItem(`${CONFIG.TOURNAMENT_ID}-caddie-photos`, JSON.stringify(merged)); } catch (e) {}
+              return merged;
+            });
+          }
+          if (cloudAnnotations) {
+            setAnnotations(prevLocal => {
+              const merged = { ...prevLocal, ...cloudAnnotations };
+              try { localStorage.setItem(`${CONFIG.TOURNAMENT_ID}-caddie-annotations`, JSON.stringify(merged)); } catch (e) {}
+              return merged;
+            });
+          }
+          setCloudSyncStatus('restored');
+          setLastSyncedAt(new Date());
+        } catch (e) {
+          setCloudSyncStatus('offline');
+        }
+      }, []);
+
+      React.useEffect(() => {
+        syncFromCloud();
+        const onFocus = () => syncFromCloud();
+        window.addEventListener('focus', onFocus);
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') syncFromCloud();
+        });
+        const interval = setInterval(syncFromCloud, 60000);
+        return () => {
+          window.removeEventListener('focus', onFocus);
+          clearInterval(interval);
+        };
+      }, [syncFromCloud]);
+
+      // One-time migration: older saved edits may have a separate teeShotType
+      // field from before the shot-type box was merged into the main tee
+      // shot text. Fold any leftover value into teeShotDisc so nothing typed
+      // in previously is silently lost.
+      React.useEffect(() => {
+        let changed = false;
+        const next = { ...edits };
+        Object.keys(next).forEach(key => {
+          const entry = next[key];
+          if (entry && entry.teeShotType !== undefined) {
+            const [c, n] = key.split('-');
+            const list = c === 'course1' ? holesCourse1 : holesCourse2;
+            const h = list[parseInt(n, 10) - 1];
+            const baseDisc = entry.teeShotDisc ?? (h ? h.teeShotDisc : '');
+            const type = entry.teeShotType || '';
+            const merged = type.trim() ? `${baseDisc} ${type}`.trim() : baseDisc;
+            const { teeShotType, ...rest } = entry;
+            next[key] = { ...rest, teeShotDisc: merged };
+            changed = true;
+          }
+        });
+        if (changed) {
+          persistEdits(next);
+          setEdits(next);
+        }
+      }, []);
+
+      const buildExportText = () => {
+        const lines = [`${CONFIG.TOURNAMENT_NAME} Cheat Sheet`, ''];
+        [[CONFIG.COURSE_1_NAME, 'course1', holesCourse1], [CONFIG.COURSE_2_NAME, 'course2', holesCourse2]].forEach(([label, courseKey, list]) => {
+          if (list.length === 0) return;
+          lines.push(label.toUpperCase(), '');
+          list.forEach(h => {
+            const key = `${courseKey}-${h.number}`;
+            const e = edits[key] || {};
+            const teeShotDisc = (e.teeShotDisc ?? h.teeShotDisc ?? '').trim();
+            const option2 = (e.teeShotOption2 ?? h.teeShotOption2 ?? '').trim();
+            const notes = (e.notes ?? h.notes ?? '').trim();
+            const doglegValue = (e.dogleg ?? h.dogleg ?? '').trim();
+
+            lines.push(`Hole ${h.number}:${h.hazard ? ' ⚠️' : ''}`);
+            lines.push(`${h.yardage}ft, Par ${h.par}`);
+            lines.push(
+              `Birdie ${h.stats.birdie}% / Par ${h.stats.par}% / Bogey ${h.stats.bogey}% / Dbl+ ${h.stats.doublePlus}%`
+            );
+            if (doglegValue) {
+              const doglegText = doglegValue.replace(/@/g, 'at').replace(/–/g, '-');
+              lines.push(`Dogleg ${doglegText}`);
+            }
+            let teeLine = `Tee shot disc: ${teeShotDisc}`;
+            if (notes) teeLine += ` ${notes}`;
+            if (option2) teeLine += `. ${option2}`;
+            lines.push(teeLine);
+            lines.push('');
+          });
+        });
+        return lines.join('\n').trim() + '\n';
+      };
+
+      const handleCopyExport = async () => {
+        const text = buildExportText();
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopyStatus('copied');
+        } catch (e) {
+          setCopyStatus('manual');
+        }
+        setTimeout(() => setCopyStatus('idle'), 2500);
+      };
+
+      const buildPhotoExportText = () => {
+        const lines = [`${CONFIG.TOURNAMENT_NAME} Photo Backup`, ''];
+        [[CONFIG.COURSE_1_NAME, 'course1', holesCourse1], [CONFIG.COURSE_2_NAME, 'course2', holesCourse2]].forEach(([label, courseKey, list]) => {
+          let sectionHasPhotos = false;
+          const sectionLines = [];
+          list.forEach(h => {
+            const key = `${courseKey}-${h.number}`;
+            const imgs = photoEdits[key]?.order ?? h.images ?? [];
+            if (imgs.length === 0) return;
+            sectionHasPhotos = true;
+            sectionLines.push(`Hole ${h.number}:`);
+            imgs.forEach(url => sectionLines.push(url));
+            sectionLines.push('');
+          });
+          if (sectionHasPhotos) {
+            lines.push(label.toUpperCase(), '', ...sectionLines);
+          }
+        });
+        if (lines.length <= 2) {
+          lines.push('(No photos yet)');
+        }
+        return lines.join('\n').trim() + '\n';
+      };
+
+      const handleCopyPhotoExport = async () => {
+        const text = buildPhotoExportText();
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopyPhotoStatus('copied');
+        } catch (e) {
+          setCopyPhotoStatus('manual');
+        }
+        setTimeout(() => setCopyPhotoStatus('idle'), 2500);
+      };
+
+      const nextHole = () => {
+        if (currentHole < holes.length) {
+          setCurrentHole(currentHole + 1);
+          setImageIndex(0);
+        }
+      };
+
+      const prevHole = () => {
+        if (currentHole > 1) {
+          setCurrentHole(currentHole - 1);
+          setImageIndex(0);
+        }
+      };
+
+      const handleImageTouchStart = (e) => {
+        touchStartX.current = e.touches[0].clientX;
+        touchStartY.current = e.touches[0].clientY;
+      };
+
+      const handleImageTouchEnd = (e, imagesLength) => {
+        if (touchStartX.current === null) return;
+        const dx = e.changedTouches[0].clientX - touchStartX.current;
+        const dy = e.changedTouches[0].clientY - touchStartY.current;
+        touchStartX.current = null;
+        touchStartY.current = null;
+        if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return;
+        if (dx < 0) {
+          setImageIndex(prev => (prev + 1) % imagesLength);
+        } else {
+          setImageIndex(prev => (prev - 1 + imagesLength) % imagesLength);
+        }
+      };
+
+      return (
+        <div className="min-h-screen bg-slate-950 text-slate-100 font-sans pb-40">
+          {/* Header */}
+          <div className="safe-top sticky top-0 bg-gradient-to-b from-slate-950 to-slate-900/80 border-b border-amber-900/30 px-4 py-3 md:py-2 z-50">
+            <div className="max-w-lg md:max-w-5xl mx-auto">
+              <div className="flex items-center justify-between mb-2 md:mb-1">
+                <div className="text-xs uppercase tracking-wider text-amber-700/80">
+                  {CONFIG.TOURNAMENT_NAME} {course === 'course1' ? CONFIG.COURSE_1_NAME : CONFIG.COURSE_2_NAME} • Round {course === 'course1' ? 1 : 2}
+                </div>
+                {holesCourse2.length > 0 && (
+                  <div className="flex bg-slate-900 border border-slate-700 rounded-lg overflow-hidden">
+                    <button
+                      onClick={() => switchCourse('course1')}
+                      className={`px-3 py-1 text-xs font-bold uppercase tracking-wide transition-all ${
+                        course === 'course1' ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {CONFIG.COURSE_1_NAME}
+                    </button>
+                    <button
+                      onClick={() => switchCourse('course2')}
+                      className={`px-3 py-1 text-xs font-bold uppercase tracking-wide transition-all ${
+                        course === 'course2' ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {CONFIG.COURSE_2_NAME}
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="flex items-baseline gap-2">
+                <div className="text-4xl md:text-2xl font-black text-amber-500 tabular-nums">
+                  {String(hole.number).padStart(2, '0')}
+                </div>
+                <div className="flex-1">
+                  <div className="text-xs text-slate-400 uppercase tracking-widest">
+                    Par {hole.par} • {hole.yardage} ft
+                  </div>
+                </div>
+                {hazardHoles.includes(hole.number) && (
+                  <div className="flex items-center gap-1 bg-amber-900/30 px-2 py-1 rounded border border-amber-700/50">
+                    <AlertCircle size={14} className="text-amber-600" />
+                    <span className="text-xs font-semibold text-amber-600">RISK</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Main Content */}
+          <div className="max-w-lg md:max-w-5xl mx-auto px-4 py-6 md:py-2 md:flex md:gap-x-6 md:items-start">
+
+            {/* Left column (desktop) — plain flex column instead of CSS grid auto-placement,
+                which kept mis-ordering/gapping items unpredictably. */}
+            <div className="space-y-4 md:space-y-1.5 md:flex-[1.1] md:min-w-0">
+
+            {/* Tier */}
+            <div className="flex gap-3 items-start mb-2 md:mb-1">
+              <div className={`
+                px-3 py-2 rounded font-bold text-sm uppercase tracking-widest whitespace-nowrap
+                ${hole.tier === 'T1' ? 'bg-red-900/50 border border-red-700/70 text-red-300' : 
+                  hole.tier === 'T2' ? 'bg-emerald-900/50 border border-emerald-700/70 text-emerald-300' : 
+                  'bg-slate-800 border border-slate-700 text-slate-300'}
+              `}>
+                {hole.tier}
+              </div>
+              <div className="flex-1">
+                <div className="text-xs uppercase tracking-wider text-slate-500 font-semibold mb-1">
+                  {hole.tierName}
+                </div>
+                {hole.hardest && (
+                  <div className="text-xs font-bold text-amber-600 bg-amber-950/40 px-2 py-1 rounded border border-amber-700/50 inline-block">
+                    {hole.hardest}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Stats */}
+            <div className="bg-slate-900/50 border border-slate-800 rounded-lg p-3 md:p-1.5">
+              <div className="grid grid-cols-4 gap-2 text-center">
+                <div className="space-y-1">
+                  <div className="text-xl md:text-lg font-black text-emerald-500 tabular-nums">{hole.stats.birdie}%</div>
+                  <div className="text-xs text-slate-400 uppercase tracking-wider">Birdie</div>
+                </div>
+                <div className="space-y-1 border-l border-slate-700 pl-2">
+                  <div className="text-xl md:text-lg font-black text-blue-500 tabular-nums">{hole.stats.par}%</div>
+                  <div className="text-xs text-slate-400 uppercase tracking-wider">Par</div>
+                </div>
+                <div className="space-y-1 border-l border-slate-700 pl-2">
+                  <div className="text-xl md:text-lg font-black text-orange-500 tabular-nums">{hole.stats.bogey}%</div>
+                  <div className="text-xs text-slate-400 uppercase tracking-wider">Bogey</div>
+                </div>
+                <div className="space-y-1 border-l border-slate-700 pl-2">
+                  <div className="text-xl md:text-lg font-black text-red-500 tabular-nums">{hole.stats.doublePlus}%</div>
+                  <div className="text-xs text-slate-400 uppercase tracking-wider">+2</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Tee Shot */}
+            <div className="bg-gradient-to-br from-amber-900/40 to-amber-950/30 border-2 border-amber-700/60 rounded-lg p-4 md:p-2.5 shadow-lg">
+              <div className="text-xs uppercase tracking-widest text-amber-600/80 mb-2 md:mb-1 font-semibold">Tee Shot</div>
+              <input
+                type="text"
+                value={edits[editKey]?.teeShotDisc ?? hole.teeShotDisc}
+                onChange={(e) => updateEdit('teeShotDisc', e.target.value)}
+                className="text-3xl md:text-lg font-black text-amber-400 bg-transparent border-b border-amber-700/50 focus:border-amber-400 outline-none w-full mb-3 md:mb-1.5"
+              />
+              <div className="pt-2 md:pt-1 border-t border-amber-800/40">
+                <div className="flex items-center justify-between mb-1">
+                  <div className="text-[10px] uppercase tracking-widest text-amber-700/70">Option 2 (alt line)</div>
+                  <button
+                    onClick={() => {
+                      const current = edits[editKey]?.teeShotDisc ?? hole.teeShotDisc;
+                      const currentOption2 = edits[editKey]?.teeShotOption2 ?? (hole.teeShotOption2 || '');
+                      updateEdit('teeShotDisc', currentOption2);
+                      updateEdit('teeShotOption2', current);
+                    }}
+                    className="text-[10px] uppercase tracking-widest text-amber-500 hover:text-amber-300 border border-amber-700/60 rounded px-2 py-0.5 flex items-center gap-1"
+                    title="Swap Tee Shot and Option 2"
+                  >
+                    ⇅ Swap
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={edits[editKey]?.teeShotOption2 ?? (hole.teeShotOption2 || '')}
+                  onChange={(e) => updateEdit('teeShotOption2', e.target.value)}
+                  placeholder="e.g. riskier line or safer bailout..."
+                  className="text-sm text-amber-300/90 bg-transparent border-b border-amber-800/40 focus:border-amber-500 outline-none w-full placeholder:text-amber-700/40"
+                />
+              </div>
+            </div>
+
+            {/* Dogleg */}
+            <div className="bg-slate-900/30 border border-slate-800 rounded-lg p-3 md:p-2">
+              <div className="text-xs uppercase tracking-widest text-slate-500 font-semibold mb-2 md:mb-1">Dogleg</div>
+              <input
+                type="text"
+                value={edits[editKey]?.dogleg ?? (hole.dogleg || '')}
+                onChange={(e) => updateEdit('dogleg', e.target.value)}
+                placeholder="Straight — no dogleg"
+                className="text-sm text-slate-300 leading-relaxed bg-transparent border-b border-slate-700 focus:border-slate-400 outline-none w-full placeholder:text-slate-600"
+              />
+            </div>
+
+            {/* Upshot */}
+            <div className="bg-slate-900/30 border border-slate-800 rounded-lg p-3 md:p-1.5">
+              <div className="text-xs uppercase tracking-widest text-slate-500 font-semibold mb-2 md:mb-1">Upshot / Approach</div>
+              <input
+                type="text"
+                value={edits[editKey]?.upshot ?? (hole.upshot || '')}
+                onChange={(e) => updateEdit('upshot', e.target.value)}
+                placeholder="—"
+                className="text-sm text-slate-300 leading-relaxed bg-transparent border-b border-slate-700 focus:border-slate-400 outline-none w-full"
+              />
+            </div>
+
+            {/* Notes */}
+            <div className="bg-slate-900/40 border border-slate-700 rounded-lg p-3 md:p-1.5">
+              <div className="text-xs uppercase tracking-widest text-slate-500 font-semibold mb-2 md:mb-1">Notes</div>
+              <textarea
+                value={edits[editKey]?.notes ?? (hole.notes || '')}
+                onChange={(e) => updateEdit('notes', e.target.value)}
+                placeholder="Add your own notes for this hole..."
+                rows={3}
+                className="text-sm md:text-xs text-slate-300 leading-relaxed bg-slate-950/40 border border-slate-700 focus:border-slate-500 outline-none w-full rounded p-2 resize-none placeholder:text-slate-600 md:h-14"
+              />
+            </div>
+            </div>
+            {/* End left column */}
+
+            {/* Photo panel — sticky on desktop so it stays visible while you scroll notes on the left */}
+            <div className="md:flex-1 md:min-w-0 space-y-4">
+
+            {/* IMAGE GALLERY */}
+            {images.length > 0 && (
+              <div className="bg-slate-900/40 border border-slate-700 rounded-lg overflow-hidden">
+                {markupMode && (
+                  <div className="bg-slate-800 px-3 py-2 flex items-center justify-between gap-2 flex-wrap border-b border-slate-700">
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => addMarker(images[imageIndex], 'box', 'FH')}
+                        className="px-3 py-1.5 bg-red-600/80 hover:bg-red-600 text-white rounded text-xs font-bold uppercase"
+                      >
+                        + FH
+                      </button>
+                      <button
+                        onClick={() => addMarker(images[imageIndex], 'box', 'BH')}
+                        className="px-3 py-1.5 bg-red-600/80 hover:bg-red-600 text-white rounded text-xs font-bold uppercase"
+                      >
+                        + BH
+                      </button>
+                      <button
+                        onClick={() => addMarker(images[imageIndex], 'circle', '')}
+                        className="px-3 py-1.5 bg-red-600/80 hover:bg-red-600 text-white rounded text-xs font-bold uppercase"
+                      >
+                        + Basket
+                      </button>
+                      <button
+                        onClick={() => addMarker(images[imageIndex], 'arrow', '')}
+                        className="px-3 py-1.5 bg-red-600/80 hover:bg-red-600 text-white rounded text-xs font-bold uppercase"
+                      >
+                        + Arrow
+                      </button>
+                    </div>
+                    <div className="text-[10px] text-slate-400 w-full sm:w-auto">Drag to move • drag corner/tip to resize</div>
+                  </div>
+                )}
+                <div
+                  ref={imageContainerRef}
+                  className="relative bg-slate-950 flex items-center justify-center min-h-[58vh] max-h-[75vh] md:min-h-[38vh] md:max-h-[46vh]"
+                  onTouchStart={markupMode ? undefined : handleImageTouchStart}
+                  onTouchEnd={markupMode ? undefined : (e) => handleImageTouchEnd(e, images.length)}
+                >
+                  <img 
+                    src={images[imageIndex]} 
+                    alt={`Hole ${hole.number} photo ${imageIndex + 1}`}
+                    className="w-full h-full object-contain transition-opacity"
+                    draggable={false}
+                  />
+
+                  {/* Markup overlay — respects the show/hide toggle, always shown while editing */}
+                  {(markupMode || markersVisible) && getMarkersForUrl(images[imageIndex]).map(marker => {
+                    const armLength = marker.armLength || 26;
+                    const boxW = marker.w || 56;
+                    const boxH = marker.h || 36;
+                    const circleSize = marker.size || 56;
+                    const arrowBox = 180;
+                    const arrowCenter = arrowBox / 2;
+                    const tipX = arrowCenter + armLength;
+                    const lineEndX = tipX - 14;
+                    return (
+                    <div
+                      key={marker.id}
+                      ref={(el) => { markerOuterRefs.current[marker.id] = el; }}
+                      onPointerDown={(e) => handleMarkerPointerDown(e, marker)}
+                      onPointerMove={(e) => {
+                        handleMarkerPointerMove(e, images[imageIndex], marker);
+                        handleRotateHandlePointerMove(e, images[imageIndex], marker);
+                        handleResizeHandlePointerMove(e, images[imageIndex], marker);
+                      }}
+                      onPointerUp={() => { handleMarkerPointerUp(); handleRotateHandlePointerUp(); handleResizeHandlePointerUp(); }}
+                      style={{
+                        position: 'absolute',
+                        left: `${marker.x}%`,
+                        top: `${marker.y}%`,
+                        transform: 'translate(-50%, -50%)',
+                        touchAction: markupMode ? 'none' : 'auto',
+                      }}
+                      className={markupMode ? 'cursor-move' : ''}
+                    >
+                      {marker.type === 'arrow' ? (
+                        <div style={{ position: 'relative', width: `${arrowBox}px`, height: `${arrowBox}px` }}>
+                          <div
+                            style={{
+                              position: 'absolute',
+                              inset: 0,
+                              transform: `rotate(${marker.rotation || 0}deg)`,
+                              transformOrigin: 'center',
+                            }}
+                          >
+                            <svg width={arrowBox} height={arrowBox} viewBox={`0 0 ${arrowBox} ${arrowBox}`} style={{ position: 'absolute', inset: 0 }}>
+                              <line x1={arrowCenter - 14} y1={arrowCenter} x2={lineEndX} y2={arrowCenter} stroke="#ef4444" strokeWidth="4" strokeLinecap="round" />
+                              <path
+                                d={`M${lineEndX} ${arrowCenter - 12} L${tipX} ${arrowCenter} L${lineEndX} ${arrowCenter + 12}`}
+                                fill="none" stroke="#ef4444" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"
+                              />
+                            </svg>
+                            {markupMode && (
+                              <div
+                                onPointerDown={(e) => handleRotateHandlePointerDown(e, marker)}
+                                style={{
+                                  position: 'absolute',
+                                  left: `${tipX}px`,
+                                  top: `${arrowCenter}px`,
+                                  transform: 'translate(-50%, -50%)',
+                                  touchAction: 'none',
+                                  width: '40px',
+                                  height: '40px',
+                                }}
+                                className="flex items-center justify-center cursor-grab"
+                                title="Drag to point direction and set length"
+                              >
+                                <div className="w-4 h-4 rounded-full bg-amber-400 border-2 border-slate-900 pointer-events-none" />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ) : marker.type === 'circle' ? (
+                        <div
+                          className="relative rounded-full border-2 border-red-500 bg-red-500/10"
+                          style={{ width: `${circleSize}px`, height: `${circleSize}px` }}
+                        >
+                          {markupMode && (
+                            <div
+                              onPointerDown={(e) => handleResizeHandlePointerDown(e, marker)}
+                              style={{
+                                position: 'absolute',
+                                left: `${circleSize / 2 + circleSize / 2.83}px`,
+                                top: `${circleSize / 2 + circleSize / 2.83}px`,
+                                transform: 'translate(-50%, -50%)',
+                                touchAction: 'none',
+                                width: '40px',
+                                height: '40px',
+                              }}
+                              className="flex items-center justify-center cursor-nwse-resize"
+                              title="Drag to resize"
+                            >
+                              <div className="w-4 h-4 rounded-full bg-amber-400 border-2 border-slate-900 pointer-events-none" />
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div
+                          className="relative flex items-center justify-center border-2 border-red-500 bg-red-500/10 rounded"
+                          style={{ width: `${boxW}px`, height: `${boxH}px` }}
+                        >
+                          {marker.text && (
+                            <span className="text-white text-xs font-bold px-1 select-none" style={{ textShadow: '0 1px 3px rgba(0,0,0,0.9)' }}>
+                              {marker.text}
+                            </span>
+                          )}
+                          {markupMode && (
+                            <div
+                              onPointerDown={(e) => handleResizeHandlePointerDown(e, marker)}
+                              style={{
+                                position: 'absolute',
+                                right: '-20px',
+                                bottom: '-20px',
+                                touchAction: 'none',
+                                width: '40px',
+                                height: '40px',
+                              }}
+                              className="flex items-center justify-center cursor-nwse-resize"
+                              title="Drag to resize"
+                            >
+                              <div className="w-4 h-4 rounded-full bg-amber-400 border-2 border-slate-900 pointer-events-none" />
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {markupMode && (
+                        <button
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={() => removeMarker(images[imageIndex], marker.id)}
+                          style={
+                            marker.type === 'arrow'
+                              ? { position: 'absolute', left: `${arrowCenter - 22}px`, top: `${arrowCenter - 22}px` }
+                              : undefined
+                          }
+                          className={`bg-slate-900 border border-red-600 text-red-400 rounded-full w-5 h-5 flex items-center justify-center text-xs leading-none z-10 ${
+                            marker.type === 'arrow' ? '' : 'absolute -top-2 -right-2'
+                          }`}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                    );
+                  })}
+
+                  {!markupMode && images.length > 1 && (
+                    <>
+                      <button
+                        onClick={() => setImageIndex((imageIndex - 1 + images.length) % images.length)}
+                        className="absolute left-2 top-1/2 -translate-y-1/2 bg-black/60 hover:bg-black/80 text-white p-2 rounded-full transition-all text-xl font-bold"
+                      >
+                        ‹
+                      </button>
+                      <button
+                        onClick={() => setImageIndex((imageIndex + 1) % images.length)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 bg-black/60 hover:bg-black/80 text-white p-2 rounded-full transition-all text-xl font-bold"
+                      >
+                        ›
+                      </button>
+                    </>
+                  )}
+                </div>
+                {images.length > 1 && (
+                  <div className="bg-slate-900 px-3 py-2 flex justify-center gap-2">
+                    {images.map((_, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => setImageIndex(idx)}
+                        className={`w-2 h-2 rounded-full transition-all ${
+                          idx === imageIndex ? 'bg-amber-500 w-4' : 'bg-slate-600 hover:bg-slate-500'
+                        }`}
+                      />
+                    ))}
+                  </div>
+                )}
+                <div className="flex items-center justify-between gap-2 text-xs text-slate-500 bg-slate-900 px-3 py-2">
+                  <span>Photo {imageIndex + 1} of {images.length}{markupMode ? ' • Markup mode' : ''}</span>
+                  {!markupMode && (
+                    <button
+                      onClick={() => window.open(images[imageIndex], '_blank')}
+                      className="px-2 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-slate-300 text-[10px] font-semibold uppercase tracking-wide whitespace-nowrap"
+                    >
+                      ⤢ Open Full Size
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setShowPhotoManager(true); setUploadError(''); }}
+                className="flex-1 px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-300 text-xs font-semibold uppercase tracking-wide"
+              >
+                Manage Photos
+              </button>
+              {images.length > 0 && (
+                <button
+                  onClick={() => setMarkupMode(prev => !prev)}
+                  className={`flex-1 px-4 py-2 rounded-lg text-xs font-semibold uppercase tracking-wide border ${
+                    markupMode
+                      ? 'bg-red-700/60 border-red-600 text-red-100'
+                      : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300'
+                  }`}
+                >
+                  {markupMode ? '✓ Done Marking Up' : '✎ Mark Up Photo'}
+                </button>
+              )}
+              {!markupMode && images.length > 0 && (
+                <button
+                  onClick={() => setMarkersVisible(prev => !prev)}
+                  title={markersVisible ? 'Hide markers' : 'Show markers'}
+                  className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-300 text-xs font-semibold"
+                >
+                  {markersVisible ? '👁' : '🚫'}
+                </button>
+              )}
+            </div>
+            </div>
+          </div>
+
+          {/* Photo Manager Modal */}
+          {showPhotoManager && (
+            <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-700 rounded-lg w-full max-w-lg max-h-[80vh] flex flex-col">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+                  <div className="text-sm font-bold text-slate-200 uppercase tracking-wide">
+                    Manage Photos — Hole {hole.number}
+                  </div>
+                  <button
+                    onClick={() => setShowPhotoManager(false)}
+                    className="text-slate-400 hover:text-slate-200 text-xl leading-none px-2"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="p-4 overflow-y-auto flex-1 space-y-3">
+                  <button
+                    onClick={() => setShowCloudSettings(prev => !prev)}
+                    className="text-xs text-slate-400 hover:text-slate-200 underline"
+                  >
+                    ⚙ {cloudConfig.cloudName && cloudConfig.uploadPreset ? 'Edit' : 'Set up'} Cloudinary settings
+                  </button>
+                  {(showCloudSettings || !cloudConfig.cloudName || !cloudConfig.uploadPreset) && (
+                    <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-3 space-y-2">
+                      <div className="text-xs uppercase tracking-widest text-amber-500/80 font-semibold">
+                        Cloudinary Setup
+                      </div>
+                      <div className="text-xs text-slate-400">
+                        In your Cloudinary dashboard: Settings → Upload → your preset → set{' '}
+                        <span className="text-slate-200">Signing Mode</span> to{' '}
+                        <span className="text-slate-200">Unsigned</span>, then enter the exact name below.
+                      </div>
+                      <input
+                        type="text"
+                        value={cloudConfig.cloudName}
+                        onChange={(e) => persistCloudConfig({ ...cloudConfig, cloudName: e.target.value })}
+                        placeholder="Cloud name (e.g. aqpu273k)"
+                        className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sm text-slate-200 outline-none focus:border-slate-500"
+                      />
+                      <input
+                        type="text"
+                        value={cloudConfig.uploadPreset}
+                        onChange={(e) => persistCloudConfig({ ...cloudConfig, uploadPreset: e.target.value })}
+                        placeholder="Unsigned upload preset name"
+                        className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sm text-slate-200 outline-none focus:border-slate-500"
+                      />
+                    </div>
+                  )}
+
+                  {images.length === 0 && (
+                    <div className="text-sm text-slate-500 text-center py-4">No photos yet for this hole.</div>
+                  )}
+
+                  {images.map((url, idx) => (
+                    <div key={url + idx} className="flex items-center gap-2 bg-slate-800/40 border border-slate-700 rounded-lg p-2">
+                      <img src={url} alt={`thumb ${idx + 1}`} className="w-14 h-14 object-cover rounded flex-shrink-0" />
+                      <div className="flex-1 text-xs text-slate-400">Photo {idx + 1}</div>
+                      <button
+                        onClick={() => moveImageAt(photoKey, images, idx, -1)}
+                        disabled={idx === 0}
+                        className="px-2 py-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-30 rounded text-slate-200 text-sm"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        onClick={() => moveImageAt(photoKey, images, idx, 1)}
+                        disabled={idx === images.length - 1}
+                        className="px-2 py-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-30 rounded text-slate-200 text-sm"
+                      >
+                        ↓
+                      </button>
+                      <button
+                        onClick={() => removeImageAt(photoKey, images, idx)}
+                        className="px-2 py-1 bg-red-900/60 hover:bg-red-900/80 border border-red-800 rounded text-red-200 text-xs font-semibold"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+
+                  {uploadError && (
+                    <div className="text-xs text-red-400 space-y-1">
+                      <div>{uploadError}</div>
+                      {uploadError.toLowerCase().includes('preset') && (
+                        <div className="text-slate-500">
+                          Double check the preset's Signing Mode is "Unsigned" in Cloudinary (Settings → Upload), and that the name above matches exactly.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="p-4 border-t border-slate-800">
+                  <label className="block w-full text-center px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-sm font-bold uppercase tracking-wide cursor-pointer">
+                    {uploadStatus === 'uploading' ? 'Uploading...' : '+ Add Photos'}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      className="hidden"
+                      disabled={uploadStatus === 'uploading'}
+                      onChange={(e) => {
+                        const files = Array.from(e.target.files || []);
+                        if (files.length > 0) uploadPhotos(photoKey, images, files);
+                        e.target.value = '';
+                      }}
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Fixed bottom bar: Hole Selector + Navigation */}
+          <div className="safe-bottom fixed bottom-0 left-0 right-0 bg-slate-950/95 backdrop-blur border-t border-amber-900/30 z-40">
+            <div className="max-w-lg md:max-w-5xl mx-auto px-4 pt-3">
+              <div className="overflow-x-auto pb-2">
+                <div className="flex gap-2 min-w-min">
+                  {holes.map(h => (
+                    <button
+                      key={h.number}
+                      onClick={() => {
+                        setCurrentHole(h.number);
+                        setImageIndex(0);
+                      }}
+                      className={`
+                        px-3 py-2 rounded font-bold text-sm tabular-nums whitespace-nowrap
+                        transition-all duration-200
+                        ${
+                          currentHole === h.number
+                            ? 'bg-amber-600 text-white shadow-lg ring-2 ring-amber-500/50'
+                            : h.hazard
+                            ? 'bg-amber-900/40 text-amber-200 border border-amber-700/60 hover:bg-amber-900/60'
+                            : 'bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700'
+                        }
+                      `}
+                    >
+                      {String(h.number).padStart(2, '0')}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Navigation */}
+            <div className="max-w-lg md:max-w-5xl mx-auto px-4 pb-3 flex items-center justify-between">
+              <button
+                onClick={prevHole}
+                disabled={currentHole === 1}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-800 text-slate-300 rounded-lg font-semibold hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                <ChevronLeft />
+                <span className="hidden sm:inline">Back</span>
+              </button>
+
+              <div className="text-center text-slate-400 text-sm">
+                <div className="font-black text-amber-500">{currentHole}</div>
+                <div className="text-xs">of {holes.length}</div>
+              </div>
+
+              <button
+                onClick={nextHole}
+                disabled={currentHole === holes.length}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-800 text-slate-300 rounded-lg font-semibold hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                <span className="hidden sm:inline">Next</span>
+                <ChevronRight />
+              </button>
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div className="max-w-lg md:max-w-5xl mx-auto px-4 py-4 md:py-2 text-center text-xs text-slate-600 border-t border-slate-800 space-y-3 md:space-y-1.5">
+            <div>{holes.length} Holes • Tournament Ready</div>
+            <div className="text-[10px] text-slate-600">
+              {cloudSyncStatus === 'checking' && '☁ Syncing...'}
+              {cloudSyncStatus === 'restored' && `☁ Synced${lastSyncedAt ? ` • ${lastSyncedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}`}
+              {cloudSyncStatus === 'offline' && '☁ Cloud sync unavailable (offline or not connected)'}
+              {cloudSyncStatus === 'idle' && supabaseClient && '☁ Cloud sync active'}
+              {cloudSyncStatus === 'unconfigured' && '☁ Cloud sync not set up (optional — see CONFIG in the code)'}
+              {supabaseClient && (
+                <button
+                  onClick={syncFromCloud}
+                  disabled={cloudSyncStatus === 'checking'}
+                  className="ml-2 underline decoration-dotted text-slate-500 hover:text-slate-300 disabled:opacity-50"
+                >
+                  Sync now
+                </button>
+              )}
+            </div>
+            <div className="flex items-center justify-center gap-2 flex-wrap">
+              <button
+                onClick={() => setShowExport(true)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-300 text-xs font-semibold uppercase tracking-wide"
+              >
+                Export My Notes
+              </button>
+              <button
+                onClick={() => setShowPhotoExport(true)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-300 text-xs font-semibold uppercase tracking-wide"
+              >
+                Export Photos
+              </button>
+            </div>
+          </div>
+
+          {/* Export Modal */}
+          {showExport && (
+            <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-700 rounded-lg w-full max-w-lg max-h-[80vh] flex flex-col">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+                  <div className="text-sm font-bold text-slate-200 uppercase tracking-wide">Export Notes</div>
+                  <button
+                    onClick={() => setShowExport(false)}
+                    className="text-slate-400 hover:text-slate-200 text-xl leading-none px-2"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="p-4 overflow-y-auto flex-1">
+                  <textarea
+                    readOnly
+                    value={buildExportText()}
+                    rows={14}
+                    className="w-full bg-slate-950 border border-slate-700 rounded p-3 text-xs text-slate-300 font-mono leading-relaxed outline-none resize-none"
+                    onFocus={(e) => e.target.select()}
+                  />
+                </div>
+                <div className="p-4 border-t border-slate-800 flex items-center gap-3">
+                  <button
+                    onClick={handleCopyExport}
+                    className="flex-1 px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-sm font-bold uppercase tracking-wide"
+                  >
+                    {copyStatus === 'copied' ? 'Copied!' : copyStatus === 'manual' ? 'Tap text & copy manually' : 'Copy to Clipboard'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Photo Export Modal */}
+          {showPhotoExport && (
+            <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-700 rounded-lg w-full max-w-lg max-h-[80vh] flex flex-col">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+                  <div className="text-sm font-bold text-slate-200 uppercase tracking-wide">Export Photos</div>
+                  <button
+                    onClick={() => setShowPhotoExport(false)}
+                    className="text-slate-400 hover:text-slate-200 text-xl leading-none px-2"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="p-4 overflow-y-auto flex-1">
+                  <div className="text-xs text-slate-500 mb-2">
+                    Every photo URL currently showing in the app, in order, per hole. Save this somewhere safe as a backup.
+                  </div>
+                  <textarea
+                    readOnly
+                    value={buildPhotoExportText()}
+                    rows={14}
+                    className="w-full bg-slate-950 border border-slate-700 rounded p-3 text-xs text-slate-300 font-mono leading-relaxed outline-none resize-none"
+                    onFocus={(e) => e.target.select()}
+                  />
+                </div>
+                <div className="p-4 border-t border-slate-800 flex items-center gap-3">
+                  <button
+                    onClick={handleCopyPhotoExport}
+                    className="flex-1 px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-sm font-bold uppercase tracking-wide"
+                  >
+                    {copyPhotoStatus === 'copied' ? 'Copied!' : copyPhotoStatus === 'manual' ? 'Tap text & copy manually' : 'Copy to Clipboard'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<BlackLocustApp />);
+  </script>
+</body>
+</html>
